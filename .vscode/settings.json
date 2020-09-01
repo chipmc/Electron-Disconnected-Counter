@@ -1,0 +1,7 @@
+{
+    "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
+    "particle.firmwareVersion": "1.5.2",
+    "particle.targetPlatform": "electron",
+    "cortex-debug.openocdPath": "${command:particle.getDebuggerOpenocdPath}",
+    "particle.targetDevice": "NC-PilotMtn-Disconnected-Bean-Trail"
+}
