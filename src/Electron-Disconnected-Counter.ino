@@ -11,13 +11,14 @@ configuration update.
 */
 
 //v1.00 - Adapted from the Electron Connected Counter Baseline
+//v1.05 - A number of fixes - will move to daily writes to the datalogger
 
 
 // Particle Product definitions
 PRODUCT_ID(11878);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(1);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="1.01";
+char currentPointRelease[6] ="1.05";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -61,7 +62,7 @@ struct currentCounts_structure {                    // currently 10 bytes long
 } current;
 
 struct hourlyCounts_structure {
-  unsigned long startingTimeStamp;                  // When did we start counting each day
+  time_t startingTimeStamp;                  // When did we start counting each day
   int dailyCount;                                   // Total count for the day
   int hourlyCount[24];                              // Array to hold counts for each hour in the day
   int minStateOfCharge;                             // Minimum battery value that day
@@ -124,15 +125,20 @@ bool systemStatusWriteNeeded = false;               // Keep track of when we nee
 bool currentCountsWriteNeeded = false;
 bool hourliesCountsWriteNeeded = false;
 char sensorTypeConfigStr[16];
+bool initializeOnce = true;
 
 // This section is where we will initialize sensor specific variables, libraries and function prototypes
 // Pressure Sensor Variables
 volatile bool sensorDetect = false;                 // This is the flag that an interrupt is triggered
 
+
+Timer countSignalTimer(1000, countSignalTimerISR, true);
+
 void setup()                                        // Note: Disconnected Setup()
 {
 
   Serial1.begin(115200);
+
   /* Setup is run for three reasons once we deploy a sensor:
        1) When you deploy the sensor
        2) Each hour while the device is sleeping
@@ -148,7 +154,6 @@ void setup()                                        // Note: Disconnected Setup(
   pinMode(hardResetPin,OUTPUT);                     // For a hard reset active HIGH
   pinMode(tmp36Shutdwn,OUTPUT);                     // Turn on the temp sensor
   pinSetFast(tmp36Shutdwn);                         // The sensor draws only 50uA so will just leave it on.
-  //pinSetFast(dataLogResetPin);
   pinMode(dataLogResetPin,OUTPUT);
   digitalWrite(dataLogResetPin,HIGH);
 
@@ -222,6 +227,9 @@ void setup()                                        // Note: Disconnected Setup(
   if (current.hourlyCount) currentHourlyPeriod = Time.hour(current.lastCountTime);
   else currentHourlyPeriod = Time.hour();                              // The local time hourly period for reporting purposes
 
+  // Done with the current counts - now load the start time stamp from hourlies
+  fram.get(FRAM::hourlyCountsAddr, hourlies);
+
   setPowerConfig();                                                    // Executes commands that set up the Power configuration between Solar and DC-Powered
 
   if (!digitalRead(userSwitch)) {
@@ -231,16 +239,17 @@ void setup()                                        // Note: Disconnected Setup(
 
   // Here is where the code diverges based on why we are running Setup()
   // Deterimine when the last counts were taken check when starting test to determine if we reload values or start counts over
-  
-  if (Time.day() != Time.day(current.lastCountTime)) resetCounts("1"); // Zero the counts for the new day
-
   if ((Time.hour() >= sysStatus.closeTime || Time.hour() < sysStatus.openTime)) {} // The park is closed - don't connect
-  else {                                                              // Park is open let's get ready for the day
+  else {                                                                         // Park is open let's get ready for the day                                                   
     hourlyAtomic.store(0,std::memory_order_relaxed);
     dailyAtomic.store(0,std::memory_order_relaxed);
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) connectToParticle(); // Only going to connect if we are in connectionMode
     takeMeasurements();                                               // Populates values so you can read them before the hour
+    if (Time.day(hourlies.startingTimeStamp) != Time.day()) {
+      resetCounts("1");
+      hourliesCountsWriteNeeded = true;
+    }  
   }
 
   pinResetFast(ledPower);                                             // Turns off the LED on the sensor board
@@ -256,9 +265,10 @@ void loop()
   case IDLE_STATE:                                                    // Where we spend most time - note, the order of these conditionals is important
     if (watchdogFlag) petWatchdog();                                  // Watchdog flag is raised - time to pet the watchdog
     if (sensorDetect) recordCount();                                  // The ISR had raised the sensor flag
+    if (!digitalRead(userSwitch)) initializeDataLog();
     if (sysStatus.disconnectedLogger && millis() - stayAwakeTimeStamp > 1000) state = NAPPING_STATE;          // We will always nap between counts
-    if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
     if ((Time.hour() >= sysStatus.closeTime || Time.hour() < sysStatus.openTime)) state = SLEEPING_STATE;   // The park is closed - sleep
+    if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;  // We want to report on the hour but not after bedtime
     break;
 
   case SLEEPING_STATE: {                                              // This state is triggered once the park closes and runs until it opens
@@ -276,7 +286,7 @@ void loop()
     } break;
 
   case NAPPING_STATE: {  // This state puts the device in low power mode quickly
-    if (sensorDetect) break;                                          // Don't nap until we are done with event
+    if (sensorDetect || countSignalTimer.isActive()) break;                                          // Don't nap until we are done with event
     if (sysStatus.connectedStatus) disconnectFromParticle();          // If we are in connected mode we need to Disconnect from Particle
     int wakeInSeconds = constrain(wakeBoundary - Time.now() % wakeBoundary, 1, wakeBoundary);
     petWatchdog();                                                    // Reset the watchdog timer interval
@@ -289,8 +299,9 @@ void loop()
 
   case REPORTING_STATE:
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
-      recordHourlyData();
-      writeToDataLog();
+      recordHourlyData();                                             // Record the current data to the data array / FRAM
+      // if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
+      writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
       state = IDLE_STATE;                                             // Wait for Response
     break;
 
@@ -328,9 +339,10 @@ void loop()
 
 void recordCount() // This is where we check to see if an interrupt is set when not asleep or act on a tap that woke the Arduino
 {
-  static byte currentMinutePeriod;                                    // Current minute
+  static byte currentMinutePeriod;                                  // Current minute
 
-  pinSetFast(blueLED);                                                // Turn on the blue LED
+  pinSetFast(blueLED);                                              // Turn on the blue LED
+  countSignalTimer.reset();                                         // Keep the LED on for a set time so we can see it.
 
   if (currentMinutePeriod != Time.minute()) {                       // Done counting for the last minute
     currentMinutePeriod = Time.minute();                            // Reset period
@@ -343,19 +355,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   current.dailyCount += dailyAtomic.fetch_and(0,std::memory_order_relaxed);    // Increment the dailyCount from the atomic vairable
 
   currentCountsWriteNeeded = true;                                    // Write updated values to FRAM
-  pinResetFast(blueLED);                                              // Turn off the blue LED
   sensorDetect = false;                                               // Reset the flag
-
-  // This is diagnostic code
-  /*
-  if (sysStatus.stateOfCharge > hourlies.maxStateOfCharge) hourlies.maxStateOfCharge = sysStatus.stateOfCharge;
-  if (sysStatus.stateOfCharge < hourlies.minStateOfCharge) hourlies.minStateOfCharge = sysStatus.stateOfCharge;
-  hourlies.hourlyCount[Time.hour()] = current.hourlyCount;
-  hourlies.dailyCount = current.dailyCount;
-  hourliesCountsWriteNeeded = true;
-  writeToDataLog();
-  */
-  // End diagnostic code
 }
 
 void recordHourlyData() {
@@ -371,7 +371,7 @@ void recordHourlyData() {
 
 void writeToDataLog() {
   char data[256];
-  snprintf(data, sizeof(data), "%i/%i, %i, %i, %i", Time.month(hourlies.startingTimeStamp), Time.day(hourlies.startingTimeStamp), hourlies.dailyCount, hourlies.maxStateOfCharge, hourlies.minStateOfCharge);
+  snprintf(data, sizeof(data), "%i/%i, %i, %i, %i", Time.month(current.lastCountTime), Time.day(current.lastCountTime), hourlies.dailyCount, hourlies.maxStateOfCharge, hourlies.minStateOfCharge);
   for (int i=0; i <24; i++) {
     strcat(data, ", ");
     strcat(data, String(hourlies.hourlyCount[i]));
@@ -380,10 +380,12 @@ void writeToDataLog() {
 }
 
 void initializeDataLog() {
-  char data[256];
-  snprintf(data, sizeof(data), "Time, Daily, Max, Min, 12AM, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12PM, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11");
-  Serial1.println(data);
-  delay(100);
+
+  if (initializeOnce) Serial1.println("Date, Daily, BattMax, BattMin, 12a,1a,2a,3a,4a,5a,6a,7a,8a,9a,10a,11a,12p,1p,2p,3p,4p,5p,6p,7p,8p,9p,10p,11p");
+
+  initializeOnce = false;
+
+  state=REPORTING_STATE;
 }
 
 
@@ -467,6 +469,9 @@ void petWatchdog()
   watchdogFlag = false;
 }
 
+void countSignalTimerISR() {
+  digitalWrite(blueLED,LOW);
+}
 
 // Power Management function
 int setPowerConfig() {
@@ -914,3 +919,5 @@ bool isDSTnz() {
   }
   return dayStartedAs;
 }
+
+
