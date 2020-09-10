@@ -344,8 +344,8 @@ void loop()
   case REPORTING_STATE:
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       recordHourlyData();                                             // Record the current data to the data array / FRAM
-      // if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
-      writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
+      if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
+      //writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
       state = IDLE_STATE;                                             // Wait for Response
     break;
 

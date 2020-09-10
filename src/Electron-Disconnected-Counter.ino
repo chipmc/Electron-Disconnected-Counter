@@ -12,13 +12,14 @@ configuration update.
 
 //v1.00 - Adapted from the Electron Connected Counter Baseline
 //v1.05 - A number of fixes - will move to daily writes to the datalogger
+//v1.06 - Release candidate - writes once a day
 
 
 // Particle Product definitions
 PRODUCT_ID(11878);                                  // Boron Connected Counter Header
 PRODUCT_VERSION(1);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="1.05";
+char currentPointRelease[6] ="1.06";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -300,8 +301,8 @@ void loop()
   case REPORTING_STATE:
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       recordHourlyData();                                             // Record the current data to the data array / FRAM
-      // if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
-      writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
+      if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
+      //writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
       state = IDLE_STATE;                                             // Wait for Response
     break;
 
