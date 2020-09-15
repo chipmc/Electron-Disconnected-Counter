@@ -13,13 +13,16 @@ configuration update.
 //v1.00 - Adapted from the Electron Connected Counter Baseline
 //v1.05 - A number of fixes - will move to daily writes to the datalogger
 //v1.06 - Release candidate - writes once a day
+//v1.07 - Fixed bug that prevented logging
+//v1.08 - Further refinement of daily logging 
+//v2.00 - Added some changes to protect the battery life
 
 
 // Particle Product definitions
 PRODUCT_ID(11878);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(1);
+PRODUCT_VERSION(2);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="1.06";
+char currentPointRelease[6] ="2.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -247,10 +250,6 @@ void setup()                                        // Note: Disconnected Setup(
     attachInterrupt(intPin, sensorISR, RISING);                       // Pressure Sensor interrupt from low to high
     if (sysStatus.connectedStatus && !Particle.connected()) connectToParticle(); // Only going to connect if we are in connectionMode
     takeMeasurements();                                               // Populates values so you can read them before the hour
-    if (Time.day(hourlies.startingTimeStamp) != Time.day()) {
-      resetCounts("1");
-      hourliesCountsWriteNeeded = true;
-    }  
   }
 
   pinResetFast(ledPower);                                             // Turns off the LED on the sensor board
@@ -301,8 +300,7 @@ void loop()
   case REPORTING_STATE:
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       recordHourlyData();                                             // Record the current data to the data array / FRAM
-      if (Time.day(hourlies.startingTimeStamp) != Time.day()) writeToDataLog();  // To write to the datalog daily - normal state
-      //writeToDataLog();                                               // To write to the datalog hourly - for diagnostics
+      if (Time.hour() == 0) dailyResetEvent();  // To write to the datalog daily - Non-sleeping case
       state = IDLE_STATE;                                             // Wait for Response
     break;
 
@@ -362,7 +360,7 @@ void recordCount() // This is where we check to see if an interrupt is set when 
 void recordHourlyData() {
   if (sysStatus.stateOfCharge > hourlies.maxStateOfCharge) hourlies.maxStateOfCharge = sysStatus.stateOfCharge;
   if (sysStatus.stateOfCharge < hourlies.minStateOfCharge) hourlies.minStateOfCharge = sysStatus.stateOfCharge;
-  hourlies.hourlyCount[Time.hour()] = current.hourlyCount;
+  hourlies.hourlyCount[currentHourlyPeriod] = current.hourlyCount;
   current.hourlyCount = 0;                                            // reset each hour
   hourlies.dailyCount = current.dailyCount;
   hourliesCountsWriteNeeded = true;
@@ -387,6 +385,26 @@ void initializeDataLog() {
   initializeOnce = false;
 
   state=REPORTING_STATE;
+}
+
+void dailyResetEvent() {
+  takeMeasurements();
+    
+  if (sysStatus.stateOfCharge < 60) setDisconnectedMode("1");     // Someone forgot to put it into disconnected mode
+  
+  if (sysStatus.stateOfCharge < 50) {                             // Battery levels are getting low - reduce reporting
+    sysStatus.openTime = 6;
+    sysStatus.closeTime = 21;
+  }
+  else if (sysStatus.stateOfCharge > 90) {                        // Battery levels are high - more reporting
+    sysStatus.openTime = 0;
+    sysStatus.closeTime = 24;
+  }
+  writeToDataLog();                                               // To write to the datalog daily - covers state where deivce sleeps
+  resetCounts("1");
+  hourliesCountsWriteNeeded = true;
+  systemStatusWriteNeeded = true;
+  initializeOnce = true;
 }
 
 
