@@ -21,7 +21,7 @@ configuration update.
 //v1.06 - Release candidate - writes once a day
 //v1.07 - Fixed bug that prevented logging
 //v1.08 - Further refinement of daily logging 
-//v2.00 - Added some changes to protect the battery life
+//v2.00 - Added to explicitly select the senor type at boot time
 
 
 // Particle Product definitions
@@ -153,7 +153,7 @@ const int userSwitch =    D5;                       // User switch with a pull-u
 
 const int intPin =        B1;                       // Pressure Sensor inerrupt pin
 const int disableModule = B3;                       // For Production Devices - Bringining this low turns on the sensor (pull-up on sensor board)
-// const int disableModule = B2;                       // For Electron-Dev - Bringining this low turns on the sensor (pull-up on sensor board)
+// const int disableModule = B2;                    // For Electron-Dev - Bringining this low turns on the sensor (pull-up on sensor board)
 const int ledPower =      B4;                       // Allows us to control the indicator LED on the sensor board
 
 // Timing Variables
@@ -254,6 +254,10 @@ void setup()                                        // Note: Disconnected Setup(
 
   checkSystemValues();                                                // Make sure System values are all in valid range
 
+  // *************************
+  sysStatus.sensorType = 1;                                           // This forces the PIR sensor - over-writes the carrier board
+  // *************************
+
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
     systemStatusWriteNeeded = true;                                    // If so, store incremented number - watchdog must have done This
@@ -266,7 +270,7 @@ void setup()                                        // Note: Disconnected Setup(
   else strcpy(sensorTypeConfigStr,"Legacy Sensor");
 
   Time.setDSTOffset(sysStatus.dstOffset);                              // Set the value from FRAM if in limits
-  DSTRULES() ? Time.beginDST() : Time.endDST();    // Perform the DST calculation here
+  DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
   Time.zone(sysStatus.timezone);                                       // Set the Time Zone for our device
 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);   // Load the offset string
@@ -346,6 +350,7 @@ void loop()
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       recordHourlyData();                                             // Record the current data to the data array / FRAM
       if (Time.hour() == 0) dailyResetEvent();  // To write to the datalog daily - Non-sleeping case
+      writeToDataLog();                                               // To write to the datalog daily - covers state where deivce sleeps
       state = IDLE_STATE;                                             // Wait for Response
     break;
 
@@ -398,15 +403,15 @@ void recordCount() // This is where we check to see if an interrupt is set when 
   current.hourlyCount += hourlyAtomic.fetch_and(0,std::memory_order_relaxed);   // Increment the hourlyCount from the atomic variable
   current.dailyCount += dailyAtomic.fetch_and(0,std::memory_order_relaxed);    // Increment the dailyCount from the atomic vairable
 
-  currentCountsWriteNeeded = true;                                    // Write updated values to FRAM
-  sensorDetect = false;                                               // Reset the flag
+  currentCountsWriteNeeded = true;                                  // Write updated values to FRAM
+  sensorDetect = false;                                             // Reset the flag
 }
 
 void recordHourlyData() {
   if (sysStatus.stateOfCharge > hourlies.maxStateOfCharge) hourlies.maxStateOfCharge = sysStatus.stateOfCharge;
   if (sysStatus.stateOfCharge < hourlies.minStateOfCharge) hourlies.minStateOfCharge = sysStatus.stateOfCharge;
   hourlies.hourlyCount[currentHourlyPeriod] = current.hourlyCount;
-  current.hourlyCount = 0;                                            // reset each hour
+  current.hourlyCount = 0;                                          // reset each hour
   hourlies.dailyCount = current.dailyCount;
   hourliesCountsWriteNeeded = true;
   currentCountsWriteNeeded = true;
@@ -423,17 +428,14 @@ void writeToDataLog() {
   Serial1.println(data);
 }
 
-void initializeDataLog() {
-
+void initializeDataLog() {                                        // Simply writes the header line after the memory card is swapped out
   if (initializeOnce) Serial1.println("Date, Daily, BattMax, BattMin, 12a,1a,2a,3a,4a,5a,6a,7a,8a,9a,10a,11a,12p,1p,2p,3p,4p,5p,6p,7p,8p,9p,10p,11p");
-
   initializeOnce = false;
-
-  state=REPORTING_STATE;
 }
 
 void dailyResetEvent() {
   takeMeasurements();
+  DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
     
   if (sysStatus.stateOfCharge < 60) setDisconnectedMode("1");     // Someone forgot to put it into disconnected mode
   
@@ -447,8 +449,6 @@ void dailyResetEvent() {
   }
   writeToDataLog();                                               // To write to the datalog daily - covers state where deivce sleeps
   resetCounts("1");
-  hourliesCountsWriteNeeded = true;
-  systemStatusWriteNeeded = true;
   initializeOnce = true;
 }
 
