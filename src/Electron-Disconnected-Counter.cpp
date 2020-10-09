@@ -22,6 +22,9 @@ configuration update.
 //v1.07 - Fixed bug that prevented logging
 //v1.08 - Further refinement of daily logging 
 //v2.00 - Added to explicitly select the senor type at boot time
+//v2.01 - Fixes for lack of reset at the end of the day 
+//v2.02 - No, really fixes for end of the day lack of reset
+//v3.00 - Resets working.  Removed one hourly write on reset hour
 
 
 // Particle Product definitions
@@ -57,17 +60,16 @@ int setverboseMode(String command);
 int setTimeZone(String command);
 int setOpenTime(String command);
 int setCloseTime(String command);
-int setLowPowerMode(String command);
 void publishStateTransition(void);
 void fullModemReset();
 int setDSTOffset(String command);
 bool isDSTusa();
 bool isDSTnz();
-#line 22 "/Users/chipmc/Documents/Maker/Particle/Projects/Electron-Disconnected-Counter/src/Electron-Disconnected-Counter.ino"
+#line 25 "/Users/chipmc/Documents/Maker/Particle/Projects/Electron-Disconnected-Counter/src/Electron-Disconnected-Counter.ino"
 PRODUCT_ID(11878);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(2);
+PRODUCT_VERSION(3);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="2.00";
+char currentPointRelease[6] ="3.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -255,15 +257,14 @@ void setup()                                        // Note: Disconnected Setup(
   checkSystemValues();                                                // Make sure System values are all in valid range
 
   // *************************
-  sysStatus.sensorType = 1;                                           // This forces the PIR sensor - over-writes the carrier board
+  sysStatus.sensorType = 1;                                         // This forces the PIR sensor - over-writes the carrier board
+  //sysStatus.sensorType = 0;                                           // This forces the Pressure sensor - over-writes the carrier board
   // *************************
 
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
     sysStatus.resetCount++;
     systemStatusWriteNeeded = true;                                    // If so, store incremented number - watchdog must have done This
   }
-
-  (sysStatus.lowPowerMode) ? strcpy(lowPowerModeStr,"True") : strcpy(lowPowerModeStr,"False");
 
   if (sysStatus.sensorType == 0) strcpy(sensorTypeConfigStr,"Pressure Sensor");
   else if (sysStatus.sensorType == 1) strcpy(sensorTypeConfigStr,"PIR Sensor");
@@ -349,8 +350,8 @@ void loop()
   case REPORTING_STATE:
       takeMeasurements();                                             // Update Temp, Battery and Signal Strength values
       recordHourlyData();                                             // Record the current data to the data array / FRAM
-      if (Time.hour() == 0) dailyResetEvent();  // To write to the datalog daily - Non-sleeping case
       writeToDataLog();                                               // To write to the datalog daily - covers state where deivce sleeps
+      if (Time.hour() == 0 || Time.hour() == sysStatus.closeTime) dailyResetEvent();  // To write to the datalog daily - Non-sleeping case
       state = IDLE_STATE;                                             // Wait for Response
     break;
 
@@ -420,7 +421,7 @@ void recordHourlyData() {
 
 void writeToDataLog() {
   char data[256];
-  snprintf(data, sizeof(data), "%i/%i, %i, %i, %i", Time.month(current.lastCountTime), Time.day(current.lastCountTime), hourlies.dailyCount, hourlies.maxStateOfCharge, hourlies.minStateOfCharge);
+  snprintf(data, sizeof(data), "%i/%i, %i, %i, %i, %i", Time.month(current.lastCountTime), Time.day(current.lastCountTime), Time.hour(), hourlies.dailyCount, hourlies.maxStateOfCharge, hourlies.minStateOfCharge);
   for (int i=0; i <24; i++) {
     strcat(data, ", ");
     strcat(data, String(hourlies.hourlyCount[i]));
@@ -429,7 +430,7 @@ void writeToDataLog() {
 }
 
 void initializeDataLog() {                                        // Simply writes the header line after the memory card is swapped out
-  if (initializeOnce) Serial1.println("Date, Daily, BattMax, BattMin, 12a,1a,2a,3a,4a,5a,6a,7a,8a,9a,10a,11a,12p,1p,2p,3p,4p,5p,6p,7p,8p,9p,10p,11p");
+  if (initializeOnce) Serial1.println("Date, Hour, Daily, BattMax, BattMin, 12a,1a,2a,3a,4a,5a,6a,7a,8a,9a,10a,11a,12p,1p,2p,3p,4p,5p,6p,7p,8p,9p,10p,11p");
   initializeOnce = false;
 }
 
@@ -447,7 +448,6 @@ void dailyResetEvent() {
     sysStatus.openTime = 0;
     sysStatus.closeTime = 24;
   }
-  writeToDataLog();                                               // To write to the datalog daily - covers state where deivce sleeps
   resetCounts("1");
   initializeOnce = true;
 }
@@ -589,7 +589,6 @@ void loadSystemDefaults() {                                         // Default s
   sysStatus.verboseMode = false;
   if (sysStatus.stateOfCharge < 30) sysStatus.lowBatteryMode = true;
   else sysStatus.lowBatteryMode = false;
-  setLowPowerMode("0");
   sysStatus.timezone = -5;                                          // Default is East Coast Time
   sysStatus.dstOffset = 1;
   sysStatus.openTime = 6;
@@ -675,10 +674,10 @@ int resetCounts(String command)                                       // Resets 
   {
     if (Particle.connected()) Particle.publish("Reset","All counts reset",PRIVATE);
 
-    current.dailyCount = 0;                              // Reset the counts in FRAM as well
+    current.dailyCount = 0;                                           // Reset the counts in FRAM as well
     current.hourlyCount = 0;
-    current.lastCountTime = Time.now();                      // Set the time context to the new day
-    sysStatus.resetCount = current.alertCount = 0;           // Reset everything for the day
+    current.lastCountTime = Time.now();                               // Set the time context to the new day
+    sysStatus.resetCount = current.alertCount = 0;                    // Reset everything for the day
 
     hourlies.startingTimeStamp = Time.now();
     hourlies.maxStateOfCharge = 0;
@@ -843,32 +842,6 @@ int setCloseTime(String command)
   systemStatusWriteNeeded = true;                          // Store the new value in FRAMwrite8
   snprintf(data, sizeof(data), "Closing time set to %i",sysStatus.closeTime);
   if (Particle.connected()) Particle.publish("Time",data, PRIVATE);
-  return 1;
-}
-
-int setLowPowerMode(String command)                                   // This is where we can put the device into low power mode if needed
-{
-  if (command != "1" && command != "0") return 0;                     // Before we begin, let's make sure we have a valid input
-  if (command == "1")                                                 // Command calls for setting lowPowerMode
-  {
-    if (Particle.connected()) {
-      Particle.publish("Mode","Low Power Mode", PRIVATE);
-    }
-    sysStatus.lowPowerMode = true;
-    strcpy(lowPowerModeStr,"True");
-  }
-  else if (command == "0")                                            // Command calls for clearing lowPowerMode
-  {
-    if (!Particle.connected()) {                                      // In case we are not connected, we will do so now.
-      connectToParticle();
-      sysStatus.connectedStatus = true;
-    }
-    Particle.publish("Mode","Normal Operations", PRIVATE);
-    delay(1000);                                                      // Need to make sure the message gets out.
-    sysStatus.lowPowerMode = false;                                   // update the variable used for console status
-    strcpy(lowPowerModeStr,"False");                                  // Use capitalization so we know that we set this.
-  }
-  systemStatusWriteNeeded = true;
   return 1;
 }
 
