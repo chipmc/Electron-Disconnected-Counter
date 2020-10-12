@@ -6,7 +6,7 @@
 #line 1 "/Users/chipmc/Documents/Maker/Particle/Projects/Electron-Disconnected-Counter/src/Electron-Disconnected-Counter.ino"
 /*
 * Project Electron Disconnected Counter - purpose build for no-connectivity use cases
-* Description: Cellular Connected Data Logger for Utility and Solar powered installations
+* Description: Cellular Connected Data Logger for Utility and Solar powered installations - Now with extedned Disconnected functionality
 * Author: Chip McClelland
 * Date:September 1st 2020
 */
@@ -25,6 +25,7 @@ configuration update.
 //v2.01 - Fixes for lack of reset at the end of the day 
 //v2.02 - No, really fixes for end of the day lack of reset
 //v3.00 - Resets working.  Removed one hourly write on reset hour
+//v4.00 - Added code to write the current values when the user button is pressed to help in troubleshooeting.
 
 
 // Particle Product definitions
@@ -65,11 +66,11 @@ void fullModemReset();
 int setDSTOffset(String command);
 bool isDSTusa();
 bool isDSTnz();
-#line 25 "/Users/chipmc/Documents/Maker/Particle/Projects/Electron-Disconnected-Counter/src/Electron-Disconnected-Counter.ino"
+#line 26 "/Users/chipmc/Documents/Maker/Particle/Projects/Electron-Disconnected-Counter/src/Electron-Disconnected-Counter.ino"
 PRODUCT_ID(11878);                                  // Boron Connected Counter Header
-PRODUCT_VERSION(3);
+PRODUCT_VERSION(4);
 #define DSTRULES isDSTusa
-char currentPointRelease[6] ="3.00";
+char currentPointRelease[6] ="4.00";
 
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
@@ -258,7 +259,7 @@ void setup()                                        // Note: Disconnected Setup(
 
   // *************************
   sysStatus.sensorType = 1;                                         // This forces the PIR sensor - over-writes the carrier board
-  //sysStatus.sensorType = 0;                                           // This forces the Pressure sensor - over-writes the carrier board
+  // sysStatus.sensorType = 0;                                           // This forces the Pressure sensor - over-writes the carrier board
   // *************************
 
   if (System.resetReason() == RESET_REASON_PIN_RESET || System.resetReason() == RESET_REASON_USER) { // Check to see if we are starting from a pin reset or a reset in the sketch
@@ -430,13 +431,16 @@ void writeToDataLog() {
 }
 
 void initializeDataLog() {                                        // Simply writes the header line after the memory card is swapped out
+  takeMeasurements();
   if (initializeOnce) Serial1.println("Date, Hour, Daily, BattMax, BattMin, 12a,1a,2a,3a,4a,5a,6a,7a,8a,9a,10a,11a,12p,1p,2p,3p,4p,5p,6p,7p,8p,9p,10p,11p");
+  writeToDataLog();                                               // We can use this to see if the sensor is working in the field
   initializeOnce = false;
+  while (!digitalRead(userSwitch)) delay(10);                      // Wiat until we let off the userSwitch to prevent multiple writes
 }
 
 void dailyResetEvent() {
   takeMeasurements();
-  DSTRULES() ? Time.beginDST() : Time.endDST();                        // Perform the DST calculation here
+  DSTRULES() ? Time.beginDST() : Time.endDST();                   // Perform the DST calculation here
     
   if (sysStatus.stateOfCharge < 60) setDisconnectedMode("1");     // Someone forgot to put it into disconnected mode
   
@@ -609,9 +613,12 @@ void checkSystemValues() {                                          // Checks to
     sysStatus.sensorType = 0;
     strcpy(sensorTypeConfigStr,"Pressure Sensor");
   }
+  sysStatus.solarPowerMode = true;                                  // Always solar in this use case
   if (sysStatus.lowBatteryMode < 0 || sysStatus.lowBatteryMode > 1) sysStatus.lowBatteryMode = 0;
+
   if (sysStatus.stateOfCharge < 30) sysStatus.lowBatteryMode = true;
   else sysStatus.lowBatteryMode = false;
+  
   if (sysStatus.resetCount < 0 || sysStatus.resetCount > 255) sysStatus.resetCount = 0;
   if (sysStatus.timezone < -12 || sysStatus.timezone > 12) sysStatus.timezone = -5;
   if (sysStatus.dstOffset < 0 || sysStatus.dstOffset > 2) sysStatus.dstOffset = 1;
